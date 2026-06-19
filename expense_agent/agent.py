@@ -83,6 +83,7 @@ from google.adk.agents import LlmAgent
 from google.adk.agents.context import Context
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events.event import Event
+from google.adk.events.event_actions import EventActions
 from google.adk.events.request_input import RequestInput
 from google.adk.workflow import Workflow
 from google.genai import types
@@ -182,11 +183,13 @@ def route_expense(ctx: Context, node_input: ParsedExpense) -> Event:
         else "llm_review"
     )
     return Event(
-        output=node_input.model_dump(),  # pass the full ParsedExpense to next node
-        route=route,  # ← drives the conditional edges below
-        state={
-            "expense": node_input.model_dump()
-        },  # store for later nodes via ctx.state
+        output=node_input.model_dump(),
+        actions=EventActions(
+            route=route,
+            state_delta={
+                "expense": node_input.model_dump(),
+            },
+        ),
     )
 
 
@@ -336,7 +339,14 @@ async def request_human_approval(ctx: Context, node_input: RiskAssessment):
     # to record_outcome.  The decision is carried in the output dict.
     yield Event(
         output={"decision": decision, "reviewer_note": note},
-        state={"human_decision": {"decision": decision, "reviewer_note": note}},
+        actions=EventActions(
+            state_delta={
+                "human_decision": {
+                    "decision": decision,
+                    "reviewer_note": note,
+                }
+            }
+        ),
     )
 
 
@@ -378,7 +388,12 @@ def record_outcome(ctx: Context, node_input: dict) -> Event:
 
     return Event(
         output=outcome.model_dump(),
-        state={"ledger": ledger, "last_outcome": outcome.model_dump()},
+        actions=EventActions(
+            state_delta={
+                "ledger": ledger,
+                "last_outcome": outcome.model_dump(),
+            }
+        ),
     )
 
 
@@ -462,20 +477,13 @@ root_agent = Workflow(
         "larger amounts, then gates on human approval via RequestInput."
     ),
     edges=[
-        # ① Entry point
         ("START", parse_expense),
-        # ② Threshold routing — pure Python, no LLM
         (parse_expense, route_expense),
-        # ③ Fast path (amount < threshold)
-        (route_expense, auto_approve, "auto_approve"),
-        # ④ LLM review path (amount >= threshold)
-        (route_expense, llm_risk_review, "llm_review"),
-        # ⑤ Human gate — only on the LLM path
+        (route_expense, {"auto_approve": auto_approve}),
+        (route_expense, {"llm_review": llm_risk_review}),
         (llm_risk_review, request_human_approval),
-        # ⑥⑦ Both branches converge at record_outcome
         (auto_approve, record_outcome),
         (request_human_approval, record_outcome),
-        # ⑧ Final render
         (record_outcome, format_output),
     ],
 )
